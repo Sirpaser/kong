@@ -256,7 +256,8 @@ function _M:communicate(premature)
   end
 
   local peer = wrpc.new_peer(c, wrpc_config_service)
-  peer:receive_thread()
+  --peer:receive_thread()
+  peer:spawn_threads()
 
   peer:call("ConfigService.ReportBasicInfo", { plugins = self.plugins_list })
 

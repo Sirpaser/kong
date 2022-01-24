@@ -1,9 +1,12 @@
 local pb = require "pb"
 local grpc = require "kong.tools.grpc"
+local semaphore = require "ngx.semaphore"
 require "table.new"
 
 local select = select
 local table_unpack = table.unpack
+local table_insert = table.insert
+local table_remove = table.remove
 
 local exiting = ngx.worker.exiting
 
@@ -11,6 +14,29 @@ local wrpc = {}
 
 local pp = require "pl.pretty".debug
 
+
+local Queue = {}
+Queue.__index = Queue
+
+function Queue.new()
+  return setmetatable({
+    smph = semaphore.new(),
+  }, Queue)
+end
+
+function Queue:push(itm)
+  table_insert(self, itm)
+  return self.smph:post()
+end
+
+function Queue:pop(timeout)
+  local ok, err = self.smph:wait(timeout or 1)
+  if not ok then
+    return nil, err
+  end
+
+  return table_remove(self, 1)
+end
 
 local function merge(a, b)
   if type(b) == "table" then
@@ -168,6 +194,7 @@ function wrpc.new_peer(conn, service, opts)
     conn = conn,
     service = service,
     seq = 0,
+    request_queue = (not conn.close) and Queue.new(),
     response_queue = {},
     closing = false,
     _receiving_thread = nil,
@@ -188,7 +215,11 @@ end
 
 
 function wrpc_peer:send(d)
-  self.conn:send_binary(d)
+  if self.request_queue then
+    return self.request_queue:push(d)
+  end
+
+  return self.conn:send_binary(d)
 end
 
 function wrpc_peer:receive()
@@ -334,15 +365,47 @@ function wrpc_peer:step()
   end
 end
 
-function wrpc_peer:receive_thread()
+function wrpc_peer:spawn_threads()
   self._receiving_thread = assert(ngx.thread.spawn(function()
     while not exiting() and not self.closing do
       self:step()
       ngx.sleep(0)
     end
   end))
+
+  if self.request_queue then
+    self._transmit_thread = assert(ngx.thread.spawn(function()
+      while not exiting() and not self.closing do
+        local data, err = self.request_queue:pop()
+        if data then
+          self.conn:send_binary(data)
+
+        else
+          if err ~= "timeout" then
+            return nil, err
+          end
+        end
+      end
+    end))
+  end
 end
 
+
+function wrpc_peer:wait_threads()
+  local ok, err, perr = ngx.thread.wait(self._receiving_thread, self._transmit_thread)
+
+  if self._receiving_thread then
+    ngx.thread.kill(self._receiving_thread)
+    self._receiving_thread = nil
+  end
+
+  if self._transmit_thread then
+    ngx.thread.kill(self._transmit_thread)
+    self._transmit_thread = nil
+  end
+
+  return ok, err, perr
+end
 
 --- Returns the response for a given call ID, if any
 function wrpc_peer:get_response(req_id)

@@ -62,7 +62,6 @@ local REMOVED_FIELDS = require("kong.clustering.compat.removed_fields")
 local _log_prefix = "[clustering] "
 
 local wrpc_config_service
---local clients = {}
 
 local function get_config_service(self)
   if not wrpc_config_service then
@@ -231,22 +230,35 @@ end
 -- for test
 _M._get_removed_fields = get_removed_fields
 
-local function simplify_things(val)
-  local typ = type(val)
-  if typ == "table" then
-    local out = {}
-    for k, v in pairs(val) do
-      if type(k) == "string" or type(k) == "number" then
-        out[k] = simplify_things(v)
-      end
-    end
-    return out
-  end
+--local function simplify_things(val)
+--  local typ = type(val)
+--  if typ == "table" then
+--    local out = {}
+--    for k, v in pairs(val) do
+--      if type(k) == "string" or type(k) == "number" then
+--        out[k] = simplify_things(v)
+--      end
+--    end
+--    return out
+--  end
+--
+--  if typ == "string" or typ == "number" or typ == "boolean" then
+--    return val
+--  end
+--end
 
-  if typ == "string" or typ == "number" or typ == "boolean" then
-    return val
+local ngx_null = ngx.null
+local function remove_nulls(tbl)
+  for k,v in pairs(tbl) do
+    if v == ngx_null then
+      tbl[k] = nil
+    elseif type(v) == "table" then
+      tbl[k] = remove_nulls(v)
+    end
   end
+  return tbl
 end
+
 
 -- returns has_update, modified_deflated_payload, err
 local function update_compatible_payload(payload, dp_version)
@@ -301,7 +313,7 @@ function _M:export_deflated_reconfigure_payload()
   --  config_hash = config_hash,
   --}
 
-  local payload = simplify_things({
+  local payload = remove_nulls({
     format_version = config_table._format_version,
     services = config_table.services,
     routes = config_table.routes,
@@ -699,7 +711,7 @@ function _M:handle_cp_websocket()
     basic_info_semaphore = semaphore.new()
   }
   self.clients[w_peer.conn] = client
-  w_peer:receive_thread()
+  w_peer:spawn_threads()
   --ngx.thread.wait(w_peer._receiving_thread)
   --do return ngx_exit(ngx_CLOSE) end
 
@@ -784,7 +796,8 @@ function _M:handle_cp_websocket()
   end
 
   ngx_log(ngx_DEBUG, _log_prefix, "data plane connected", log_suffix)
-  ngx.thread.wait(w_peer._receiving_thread)
+  --ngx.thread.wait(w_peer._receiving_thread)
+  w_peer:wait_threads()
   w_peer:close()
   self.clients[wb] = nil
   do return ngx_exit(ngx_CLOSE) end
