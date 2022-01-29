@@ -38,6 +38,22 @@ function Queue:pop(timeout)
   return table_remove(self, 1)
 end
 
+local semaphore_waiter
+do
+  local function trigger(self, data)
+    self.data = data
+    self.smph:post()
+  end
+
+  function semaphore_waiter()
+    return {
+      smph = semaphore.new(),
+      handle = trigger,
+    }
+  end
+end
+
+
 local function merge(a, b)
   if type(b) == "table" then
     for k, v in pairs(b) do
@@ -223,26 +239,20 @@ function wrpc_peer:send(d)
 end
 
 function wrpc_peer:receive()
-  --print("------------- wrpc_peer:receive()")
   while true do
     local data, typ, err = self.conn:recv_frame()
-    --print(string.format("data: %q, typ: %q, err: %q", data, typ, err))
     if not data then
-      --print("no data!")
       return nil, err
     end
 
     if typ == "binary" then
-      --print("returning data")
       return data
     end
 
     if typ == "close" then
-      --print("close frame")
       kong.log.notice("Received WebSocket \"close\" frame from peer")
       return self:close()
     end
-    --print("going round...")
   end
 end
 
@@ -251,6 +261,19 @@ end
 function wrpc_peer:call(name, ...)
   local rpc, payloads = assert(self.service:encode_args(name, ...))
   return self:send_encoded_call(rpc, payloads)
+end
+
+
+function wrpc_peer:call_wait(name, ...)
+  local waiter = semaphore_waiter()
+
+  local next_seq = self.seq + 1
+  self.response_queue[next_seq] = waiter
+  local new_seq = self:call(name, ...)
+  assert(new_seq == next_seq)
+
+  waiter.smph:wait()
+  return waiter.data
 end
 
 
@@ -320,8 +343,12 @@ function wrpc_peer:handle(payload)
   local ack = tonumber(payload.ack) or 0
   if ack > 0 then
     -- response to a previous call
-    self.response_queue[ack] = decodearray(self.decode, rpc.output_type, payload.payloads)
-    --pp("response:", ack, self.response_queue[ack])
+    local response_waiter = self.response_queue[ack]
+    if response_waiter then
+      -- TODO: verify expiration
+      response_waiter:handle(decodearray(self.decode, rpc.output_type, payload.payloads))
+      self.response_queue[ack] = nil
+    end
 
   else
     -- incoming method call
@@ -349,7 +376,6 @@ function wrpc_peer:step()
 
   while msg ~= nil do
     msg = assert(self.decode("wrpc.WebsocketPayload", msg))
-    --pp("step, decoded msg:", msg)
     assert(msg.version == "PAYLOAD_VERSION_V1", "unknown encoding version")
     local payload = msg.payload
 
