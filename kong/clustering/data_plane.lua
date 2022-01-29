@@ -51,6 +51,31 @@ local function is_timeout(err)
 end
 
 
+local function remove_empty_tables(t)
+  -- TODO: either replace this with better decoding (where nil fields are not empty tables/strings)
+  -- or make the config ignore "zero" values
+  if type(t) ~= "table" then
+    if t == "" then
+      return nil
+    end
+    return t
+  end
+
+  local n = 0
+  for k, v in pairs(t) do
+    v = remove_empty_tables(v)
+    t[k] = v
+    if v ~= nil then
+      n = n + 1
+    end
+  end
+
+  if n > 0 then
+    return t
+  end
+end
+
+
 function _M.new(parent)
   local self = {
     declarative_config = declarative.new_config(parent.conf),
@@ -209,7 +234,20 @@ local function get_config_service()
     wrpc_config_service = wrpc.new_service()
     wrpc_config_service:add("kong.services.config.v1.config")
     wrpc_config_service:set_handler("ConfigService.SyncConfig", function(client, data)
-      require "pl.pretty".debug("data", data)
+      --require "pl.pretty".debug("data", data)
+      if client.config_semaphore then
+        data.config._format_version = data.config.format_version
+        data.config.format_version = nil
+
+        client.config_obj.next_config = remove_empty_tables(data.config)
+        client.config_obj.next_hash = data.version
+        if client.config_semaphore:count() <= 0 then
+          -- the following line always executes immediately after the `if` check
+          -- because `:count` will never yield, end result is that the semaphore
+          -- count is guaranteed to not exceed 1
+          client.config_semaphore:post()
+        end
+      end
     end)
   end
 
@@ -261,13 +299,15 @@ function _M:communicate(premature)
     return
   end
 
+  local config_semaphore = semaphore.new(0)
   local peer = wrpc.new_peer(c, get_config_service())
   --peer:receive_thread()
+  peer.config_semaphore = config_semaphore
+  peer.config_obj = self
   peer:spawn_threads()
 
   peer:call("ConfigService.ReportBasicInfo", { plugins = self.plugins_list })
 
-  local config_semaphore = semaphore.new(0)
 
   -- how DP connection management works:
   -- three threads are spawned, when any of these threads exits,
