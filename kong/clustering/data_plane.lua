@@ -204,13 +204,19 @@ local function send_ping(peer, log_suffix)
 end
 
 local wrpc_config_service
-
-function _M:communicate(premature)
+local function get_config_service()
   if not wrpc_config_service then
     wrpc_config_service = wrpc.new_service()
     wrpc_config_service:add("kong.services.config.v1.config")
-    wrpc_config_service:set_handler("ConfigService.SyncConfig", require "pl.pretty".debug)
+    wrpc_config_service:set_handler("ConfigService.SyncConfig", function(client, data)
+      require "pl.pretty".debug("data", data)
+    end)
   end
+
+  return wrpc_config_service
+end
+
+function _M:communicate(premature)
 
   if premature then
     -- worker wants to exit
@@ -255,7 +261,7 @@ function _M:communicate(premature)
     return
   end
 
-  local peer = wrpc.new_peer(c, wrpc_config_service)
+  local peer = wrpc.new_peer(c, get_config_service())
   --peer:receive_thread()
   peer:spawn_threads()
 
