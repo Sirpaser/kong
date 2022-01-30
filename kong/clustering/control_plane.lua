@@ -22,16 +22,13 @@ local tonumber = tonumber
 local tostring = tostring
 local ngx = ngx
 local ngx_log = ngx.log
-local cjson_decode = cjson.decode
 local cjson_encode = cjson.encode
 local kong = kong
 local ngx_exit = ngx.exit
 local exiting = ngx.worker.exiting
 local ngx_time = ngx.time
-local ngx_now = ngx.now
 local ngx_var = ngx.var
 local table_insert = table.insert
-local table_remove = table.remove
 local table_concat = table.concat
 local gsub = string.gsub
 local deflate_gzip = utils.deflate_gzip
@@ -44,19 +41,14 @@ local ngx_INFO = ngx.INFO
 local ngx_NOTICE = ngx.NOTICE
 local ngx_WARN = ngx.WARN
 local ngx_ERR = ngx.ERR
-local ngx_OK = ngx.OK
 local ngx_CLOSE = ngx.HTTP_CLOSE
 local MAX_PAYLOAD = constants.CLUSTERING_MAX_PAYLOAD
 local WS_OPTS = {
   timeout = constants.CLUSTERING_TIMEOUT,
   max_payload_len = MAX_PAYLOAD,
 }
-local PING_INTERVAL = constants.CLUSTERING_PING_INTERVAL
-local PING_WAIT = PING_INTERVAL * 1.5
 local OCSP_TIMEOUT = constants.CLUSTERING_OCSP_TIMEOUT
 local CLUSTERING_SYNC_STATUS = constants.CLUSTERING_SYNC_STATUS
-local PONG_TYPE = "PONG"
-local RECONFIGURE_TYPE = "RECONFIGURE"
 local MAJOR_MINOR_PATTERN = "^(%d+)%.(%d+)%.%d+"
 local REMOVED_FIELDS = require("kong.clustering.compat.removed_fields")
 local _log_prefix = "[clustering] "
@@ -65,24 +57,16 @@ local wrpc_config_service
 
 local function get_config_service(self)
   if not wrpc_config_service then
-    print("loading service!!")
     wrpc_config_service = wrpc.new_service()
     wrpc_config_service:add("kong.services.config.v1.config")
     wrpc_config_service:set_handler("ConfigService.PingCP", function(peer)
-      --ngx_log(ngx_DEBUG, string.format("handling PingCP.  peer: %q, peer.conn: %q", peer, peer.conn))
       local client = self.clients[peer.conn]
       if client then
-        ngx_log(ngx_DEBUG, _log_prefix, "found client: ", client.dp_id)
         client.last_seen = ngx_time()
         ngx_log(ngx_DEBUG, _log_prefix, "received ping frame from data plane")
-
-        --config_hash = data
-        --last_seen = ngx_time()
-        --update_sync_status()
       end
     end)
     wrpc_config_service:set_handler("ConfigService.ReportBasicInfo", function(peer, data)
-      ngx_log(ngx_DEBUG, _log_prefix, "received basic_info")
       local client = self.clients[peer.conn]
       if client then
         ngx_log(ngx_DEBUG, _log_prefix, "found client: ", client.dp_id)
@@ -133,11 +117,6 @@ local function plugins_list_to_map(plugins_list)
   end
   return versions
 end
-
-
---local function is_timeout(err)
---  return err and string.sub(err, -7) == "timeout"
---end
 
 
 function _M.new(parent)
@@ -230,23 +209,6 @@ end
 -- for test
 _M._get_removed_fields = get_removed_fields
 
---local function simplify_things(val)
---  local typ = type(val)
---  if typ == "table" then
---    local out = {}
---    for k, v in pairs(val) do
---      if type(k) == "string" or type(k) == "number" then
---        out[k] = simplify_things(v)
---      end
---    end
---    return out
---  end
---
---  if typ == "string" or typ == "number" or typ == "boolean" then
---    return val
---  end
---end
-
 local ngx_null = ngx.null
 local function remove_nulls(tbl)
   for k,v in pairs(tbl) do
@@ -306,13 +268,6 @@ function _M:export_deflated_reconfigure_payload()
 
   local config_hash = self:calculate_config_hash(config_table)
 
-  --local payload = {
-  --  type = "reconfigure",
-  --  timestamp = ngx_now(),
-  --  config_table = config_table,
-  --  config_hash = config_hash,
-  --}
-
   local payload = remove_nulls({
     format_version = config_table._format_version,
     services = config_table.services,
@@ -327,75 +282,19 @@ function _M:export_deflated_reconfigure_payload()
     plugin_data = config_table.plugin_data,
     workspaces = config_table.workspaces,
   })
-  --do
-  --  local comment = payload.workspaces[1].comment
-  --  require "pl.pretty".debug("comment", comment, type(comment), getmetatable(comment), debug.getmetatable(comment))
-  --end
   local service = get_config_service(self)
   self.config_call_rpc, self.config_call_args = assert(service:encode_args("ConfigService.SyncConfig", {
     config = payload,
     version = 192, -- TODO: version?
   }))
 
-  --if not payload then
-  --  return nil, err
-  --end
-  --self.reconfigure_payload = payload
-  --
-  --payload, err = deflate_gzip(cjson_encode(payload))
-  --if not payload then
-  --  return nil, err
-  --end
-
   self.current_config_hash = config_hash
-  --self.deflated_reconfigure_payload = payload
 
   return payload, nil, config_hash
 end
 
 
-local function push_config_one_client(self, client)
-
-  client.peer:send_encoded_call(self.config_call_rpc, self.config_call_args)
-  --
-  --
-  --local previous_sync_status = client.sync_status
-  --local ok, err
-  --ok, err, client.sync_status = self:check_configuration_compatibility(client.dp_plugins_map)
-  --if ok then
-  --  local has_update, deflated_payload
-  --  has_update, deflated_payload, err = update_compatible_payload(self.reconfigure_payload, client.dp_version)
-  --  if not has_update then -- no modification, use the cached payload
-  --    deflated_payload = self.deflated_reconfigure_payload
-  --  elseif err then
-  --    ngx_log(ngx_WARN, "unable to update compatible payload: ", err, ", the unmodified config ",
-  --      "is returned", client.log_suffix)
-  --    deflated_payload = self.deflated_reconfigure_payload
-  --  end
-  --
-  --  -- config update
-  --  ok, err = client.conn:send_binary(deflated_payload)
-  --  if err then
-  --    if not is_timeout(err) then
-  --      return nil, "unable to send updated configuration to data plane: " .. err
-  --    end
-  --
-  --    ngx_log(ngx_NOTICE, _log_prefix, "unable to send updated configuration to data plane: ", err, client.log_suffix)
-  --
-  --  else
-  --    ngx_log(ngx_DEBUG, _log_prefix, "sent config update to data plane", client.log_suffix)
-  --  end
-  --
-  --else
-  --  ngx_log(ngx_WARN, _log_prefix, "unable to send updated configuration to data plane: ", err, client.log_suffix)
-  --  if client.sync_status ~= previous_sync_status then
-  --    client.update_sync_status()
-  --  end
-  --end
-end
-
 function _M:push_config()
-  ngx_log(ngx_DEBUG, "push_config")
   local payload, err = self:export_deflated_reconfigure_payload()
   if not payload then
     ngx_log(ngx_ERR, _log_prefix, "unable to export config from database: ", err)
@@ -404,15 +303,12 @@ function _M:push_config()
 
   local n = 0
   for _, client in pairs(self.clients) do
-    --push_config_one_client(_M, client)
-    require "pl.pretty".debug("encoded call:", self.config_call_rpc, self.config_call_args)
     client.peer:send_encoded_call(self.config_call_rpc, self.config_call_args)
 
     n = n + 1
   end
 
   ngx_log(ngx_DEBUG, _log_prefix, "config pushed to ", n, " clients")
-  return n
 end
 
 
@@ -700,7 +596,6 @@ function _M:handle_cp_websocket()
 
   -- connection established
   local w_peer = wrpc.new_peer(wb, get_config_service(self))
-  --ngx_log(ngx_DEBUG, string.format("wb: %q, w_peer: %q, w_peer.conn: %q", wb, w_peer, w_peer.conn))
   local client = {
     last_seen = ngx_time(),
     peer = w_peer,
@@ -712,40 +607,6 @@ function _M:handle_cp_websocket()
   }
   self.clients[w_peer.conn] = client
   w_peer:spawn_threads()
-  --ngx.thread.wait(w_peer._receiving_thread)
-  --do return ngx_exit(ngx_CLOSE) end
-
-  -- receive basic info
-  --local data, typ
-  --data, typ, err = wb:recv_frame()
-  --if err then
-  --  err = "failed to receive websocket basic info frame: " .. err
-  --
-  --elseif typ == "binary" then
-  --  if not data then
-  --    err = "failed to receive websocket basic info data"
-  --
-  --  else
-  --    data, err = cjson_decode(data)
-  --    if type(data) ~= "table" then
-  --      if err then
-  --        err = "failed to decode websocket basic info data: " .. err
-  --      else
-  --        err = "failed to decode websocket basic info data"
-  --      end
-  --
-  --    else
-  --      if data.type ~= "basic_info" then
-  --        err =  "invalid basic info data type: " .. (data.type  or "unknown")
-  --
-  --      else
-  --        if type(data.plugins) ~= "table" then
-  --          err =  "missing plugins in basic info data"
-  --        end
-  --      end
-  --    end
-  --  end
-  --end
 
   do
     local ok, err = client.basic_info_semaphore:wait(5)
@@ -763,11 +624,8 @@ function _M:handle_cp_websocket()
     end
   end
 
-  require "pl.pretty".debug("basic_info", client.basic_info)
-
   client.dp_plugins_map = plugins_list_to_map(client.basic_info.plugins)
   client.config_hash = string.rep("0", 32) -- initial hash
-  --local last_seen = ngx_time()
   client.sync_status = CLUSTERING_SYNC_STATUS.UNKNOWN
   local purge_delay = self.conf.cluster_data_plane_purge_delay
   client.update_sync_status = function()
@@ -796,197 +654,15 @@ function _M:handle_cp_websocket()
   end
 
   ngx_log(ngx_DEBUG, _log_prefix, "data plane connected", log_suffix)
-  --ngx.thread.wait(w_peer._receiving_thread)
   w_peer:wait_threads()
   w_peer:close()
   self.clients[wb] = nil
-  do return ngx_exit(ngx_CLOSE) end
 
-  ----local queue
-  ----do
-  ----  local queue_semaphore = semaphore.new()
-  ----  queue = {
-  ----    wait = function(...)
-  ----      return queue_semaphore:wait(...)
-  ----    end,
-  ----    post = function(...)
-  ----      return queue_semaphore:post(...)
-  ----    end
-  ----  }
-  ----end
-  ----
-  ----self.clients[wb] = queue
-  --
-  --if not self.deflated_reconfigure_payload then
-  --  _, err = self:export_deflated_reconfigure_payload()
-  --end
-  --
-  --if self.deflated_reconfigure_payload then
-  --  -- initial configuration compatibility for sync status variable
-  --  _, _, client.sync_status = self:check_configuration_compatibility(client.dp_plugins_map)
-  --
-  --  table_insert(queue, self.deflated_reconfigure_payload)
-  --  queue.post()
-  --
-  --else
-  --  ngx_log(ngx_ERR, _log_prefix, "unable to send initial configuration to data plane: ", err, log_suffix)
-  --end
-  --
-  ---- how control plane connection management works:
-  ---- two threads are spawned, when any of these threads exits,
-  ---- it means a fatal error has occurred on the connection,
-  ---- and the other thread is also killed
-  ----
-  ---- * read_thread: it is the only thread that receives websocket frames from the
-  ----                data plane and records the current data plane status in the
-  ----                database, and is also responsible for handling timeout detection
-  ---- * write_thread: it is the only thread that sends websocket frames to the data plane
-  ----                 by grabbing any messages currently in the send queue and
-  ----                 send them to the data plane in a FIFO order. Notice that the
-  ----                 PONG frames are also sent by this thread after they are
-  ----                 queued by the read_thread
-  --
-  ----local read_thread = ngx.thread.spawn(function()
-  ----  while not exiting() do
-  ----    local data, typ, err = wb:recv_frame()
-  ----
-  ----    if exiting() then
-  ----      return
-  ----    end
-  ----
-  ----    if err then
-  ----      if not is_timeout(err) then
-  ----        return nil, err
-  ----      end
-  ----
-  ----      local waited = ngx_time() - last_seen
-  ----      if waited > PING_WAIT then
-  ----        return nil, "did not receive ping frame from data plane within " ..
-  ----                    PING_WAIT .. " seconds"
-  ----      end
-  ----
-  ----    else
-  ----      if typ == "close" then
-  ----        ngx_log(ngx_DEBUG, _log_prefix, "received close frame from data plane", log_suffix)
-  ----        return
-  ----      end
-  ----
-  ----      if not data then
-  ----        return nil, "did not receive ping frame from data plane"
-  ----      end
-  ----
-  ----      -- dps only send pings
-  ----      if typ ~= "ping" then
-  ----        return nil, "invalid websocket frame received from data plane: " .. typ
-  ----      end
-  ----
-  ----      ngx_log(ngx_DEBUG, _log_prefix, "received ping frame from data plane", log_suffix)
-  ----
-  ----      config_hash = data
-  ----      last_seen = ngx_time()
-  ----      update_sync_status()
-  ----
-  ----      -- queue PONG to avoid races
-  ----      table_insert(queue, PONG_TYPE)
-  ----      queue.post()
-  ----    end
-  ----  end
-  ----end)
-  --
-  --local write_thread = ngx.thread.spawn(function()
-  --  while not exiting() do
-  --    local ok, err = queue.wait(5)
-  --    if exiting() then
-  --      return
-  --    end
-  --    if ok then
-  --      local payload = table_remove(queue, 1)
-  --      if not payload then
-  --        return nil, "config queue can not be empty after semaphore returns"
-  --      end
-  --
-  --      if payload == PONG_TYPE then
-  --        local _, err = wb:send_pong()
-  --        if err then
-  --          if not is_timeout(err) then
-  --            return nil, "failed to send pong frame to data plane: " .. err
-  --          end
-  --
-  --          ngx_log(ngx_NOTICE, _log_prefix, "failed to send pong frame to data plane: ", err, log_suffix)
-  --
-  --        else
-  --          ngx_log(ngx_DEBUG, _log_prefix, "sent pong frame to data plane", log_suffix)
-  --        end
-  --
-  --      else -- is reconfigure
-  --        local previous_sync_status = sync_status
-  --        ok, err, sync_status = self:check_configuration_compatibility(dp_plugins_map)
-  --        if ok then
-  --          local has_update, deflated_payload, err = update_compatible_payload(self.reconfigure_payload, dp_version)
-  --          if not has_update then -- no modification, use the cached payload
-  --            deflated_payload = self.deflated_reconfigure_payload
-  --          elseif err then
-  --            ngx_log(ngx_WARN, "unable to update compatible payload: ", err, ", the unmodified config ",
-  --                    "is returned", log_suffix)
-  --            deflated_payload = self.deflated_reconfigure_payload
-  --          end
-  --
-  --          -- config update
-  --          local _, err = wb:send_binary(deflated_payload)
-  --          if err then
-  --            if not is_timeout(err) then
-  --              return nil, "unable to send updated configuration to data plane: " .. err
-  --            end
-  --
-  --            ngx_log(ngx_NOTICE, _log_prefix, "unable to send updated configuration to data plane: ", err, log_suffix)
-  --
-  --          else
-  --            ngx_log(ngx_DEBUG, _log_prefix, "sent config update to data plane", log_suffix)
-  --          end
-  --
-  --        else
-  --          ngx_log(ngx_WARN, _log_prefix, "unable to send updated configuration to data plane: ", err, log_suffix)
-  --          if sync_status ~= previous_sync_status then
-  --            update_sync_status()
-  --          end
-  --        end
-  --      end
-  --
-  --    elseif err ~= "timeout" then
-  --      return nil, "semaphore wait error: " .. err
-  --    end
-  --  end
-  --end)
-  --
-  --local ok, err, perr = ngx.thread.wait(write_thread, read_thread)
-  --
-  --self.clients[wb] = nil
-  --
-  --ngx.thread.kill(write_thread)
-  --ngx.thread.kill(read_thread)
-  --
-  --wb:send_close()
-  --
-  ----TODO: should we update disconnect data plane status?
-  ----sync_status = CLUSTERING_SYNC_STATUS.UNKNOWN
-  ----update_sync_status()
-  --
-  --if not ok then
-  --  ngx_log(ngx_ERR, _log_prefix, err, log_suffix)
-  --  return ngx_exit(ngx_ERR)
-  --end
-  --
-  --if perr then
-  --  ngx_log(ngx_ERR, _log_prefix, perr, log_suffix)
-  --  return ngx_exit(ngx_ERR)
-  --end
-  --
-  --return ngx_exit(ngx_OK)
+  return ngx_exit(ngx_CLOSE)
 end
 
 
 local function push_config_loop(premature, self, push_config_semaphore, delay)
-  ngx_log(ngx_DEBUG, "push_config_loop: start")
   if premature then
     return
   end
@@ -1004,7 +680,6 @@ local function push_config_loop(premature, self, push_config_semaphore, delay)
       return
     end
     if ok then
-      ngx_log(ngx_DEBUG, "push_config_loop: waited")
       ok, err = pcall(self.push_config, self)
       if ok then
         local sleep_left = delay

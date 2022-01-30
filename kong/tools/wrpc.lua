@@ -12,8 +12,6 @@ local exiting = ngx.worker.exiting
 
 local wrpc = {}
 
-local pp = require "pl.pretty".debug
-
 
 local Queue = {}
 Queue.__index = Queue
@@ -100,7 +98,7 @@ function wrpc_service:add(service_name)
   }
   local service_fname = assert(proto_searchpath(service_name))
   local proto_f = assert(io.open(service_fname))
-  local scope_name = nil
+  local scope_name = ""
 
   for line in proto_f:lines() do
     local annotation = line:match("//%s*%+wrpc:%s*(.-)%s*$")
@@ -131,7 +129,7 @@ function wrpc_service:add(service_name)
   end
   proto_f:close()
 
-  grpc.each_method(service_fname, function(parsed, srvc, mthd)
+  grpc.each_method(service_fname, function(_, srvc, mthd)
     assert(srvc.name)
     assert(mthd.name)
     local rpc_name = srvc.name .. "." .. mthd.name
@@ -220,9 +218,6 @@ end
 
 function wrpc_peer:close()
   self.closing = true
-  --if self._receiving_thread then
-  --  ngx.thread.wait(self._receiving_thread)
-  --end
   self.conn:send_close()
   if self.conn.close then
     self.conn:close()
@@ -339,7 +334,6 @@ function wrpc_peer:handle(payload)
     return nil, "INVALID_SERVICE"  -- TODO: send to peer
   end
 
-  local data_type
   local ack = tonumber(payload.ack) or 0
   if ack > 0 then
     -- response to a previous call

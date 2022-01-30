@@ -15,7 +15,6 @@ local setmetatable = setmetatable
 local type = type
 local math = math
 local pcall = pcall
-local tostring = tostring
 local ngx = ngx
 local ngx_log = ngx.log
 local ngx_sleep = ngx.sleep
@@ -23,7 +22,6 @@ local cjson_decode = cjson.decode
 local cjson_encode = cjson.encode
 local kong = kong
 local exiting = ngx.worker.exiting
-local ngx_time = ngx.time
 local io_open = io.open
 local inflate_gzip = utils.inflate_gzip
 local deflate_gzip = utils.deflate_gzip
@@ -34,21 +32,13 @@ local CONFIG_CACHE = ngx.config.prefix() .. "/config.cache.json.gz"
 local ngx_ERR = ngx.ERR
 local ngx_DEBUG = ngx.DEBUG
 local ngx_INFO = ngx.INFO
-local ngx_WARN = ngx.WARN
-local ngx_NOTICE = ngx.NOTICE
 local MAX_PAYLOAD = constants.CLUSTERING_MAX_PAYLOAD
 local WS_OPTS = {
   timeout = constants.CLUSTERING_TIMEOUT,
   max_payload_len = MAX_PAYLOAD,
 }
 local PING_INTERVAL = constants.CLUSTERING_PING_INTERVAL
-local PING_WAIT = PING_INTERVAL * 1.5
 local _log_prefix = "[clustering] "
-
-
-local function is_timeout(err)
-  return err and string.sub(err, -7) == "timeout"
-end
 
 
 local function remove_empty_tables(t)
@@ -207,27 +197,6 @@ function _M:init_worker()
 end
 
 
-local function send_ping(peer, log_suffix)
-  local seq = peer:call("ConfigService.PingCP", {})
-  ngx_log(ngx_DEBUG, _log_prefix, "sent ping", log_suffix)
-  --log_suffix = log_suffix or ""
-  --
-  --local hash = declarative.get_current_hash()
-  --
-  --if hash == true then
-  --  hash = string.rep("0", 32)
-  --end
-  --
-  --local _, err = c:send_ping(hash)
-  --if err then
-  --  ngx_log(is_timeout(err) and ngx_NOTICE or ngx_WARN, _log_prefix,
-  --          "unable to send ping frame to control plane: ", err, log_suffix)
-  --
-  --else
-  --  ngx_log(ngx_DEBUG, _log_prefix, "sent ping frame to control plane", log_suffix)
-  --end
-end
-
 local wrpc_config_service
 local function get_config_service()
   if not wrpc_config_service then
@@ -377,68 +346,9 @@ function _M:communicate(premature)
     end
   end)
 
-  local read_thread = ngx.thread.spawn(function()
-    local last_seen = ngx_time()
-    while not exiting() do
-      ngx.sleep(10)
-      --local data, typ, err = c:recv_frame()
-      --if err then
-      --  if not is_timeout(err) then
-      --    return nil, "error while receiving frame from control plane: " .. err
-      --  end
-      --
-      --  local waited = ngx_time() - last_seen
-      --  if waited > PING_WAIT then
-      --    return nil, "did not receive pong frame from control plane within " .. PING_WAIT .. " seconds"
-      --  end
-      --
-      --else
-      --  if typ == "close" then
-      --    ngx_log(ngx_DEBUG, _log_prefix, "received close frame from control plane", log_suffix)
-      --    return
-      --  end
-      --
-      --  last_seen = ngx_time()
-      --
-      --  if typ == "binary" then
-      --    data = assert(inflate_gzip(data))
-      --
-      --    local msg = assert(cjson_decode(data))
-      --
-      --    if msg.type == "reconfigure" then
-      --      if msg.timestamp then
-      --        ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane with timestamp: ",
-      --                           msg.timestamp, log_suffix)
-      --
-      --      else
-      --        ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane", log_suffix)
-      --      end
-      --
-      --      self.next_config = assert(msg.config_table)
-      --      self.next_hash = msg.config_hash
-      --
-      --      if config_semaphore:count() <= 0 then
-      --        -- the following line always executes immediately after the `if` check
-      --        -- because `:count` will never yield, end result is that the semaphore
-      --        -- count is guaranteed to not exceed 1
-      --        config_semaphore:post()
-      --      end
-      --    end
-      --
-      --  elseif typ == "pong" then
-      --    ngx_log(ngx_DEBUG, _log_prefix, "received pong frame from control plane", log_suffix)
-      --
-      --  else
-      --    ngx_log(ngx_NOTICE, _log_prefix, "received unknown (", tostring(typ), ") frame from control plane",
-      --                        log_suffix)
-      --  end
-      --end
-    end
-  end)
 
-  local ok, err, perr = ngx.thread.wait(read_thread, write_thread, config_thread)
+  local ok, err, perr = ngx.thread.wait(write_thread, config_thread)
 
-  ngx.thread.kill(read_thread)
   ngx.thread.kill(write_thread)
   c:close()
 
