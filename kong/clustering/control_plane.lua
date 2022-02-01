@@ -8,7 +8,6 @@ local ocsp = require("ngx.ocsp")
 local http = require("resty.http")
 local cjson = require("cjson.safe")
 local declarative = require("kong.db.declarative")
-local utils = require("kong.tools.utils")
 local constants = require("kong.constants")
 local openssl_x509 = require("resty.openssl.x509")
 local wrpc = require("kong.tools.wrpc")
@@ -30,9 +29,6 @@ local ngx_time = ngx.time
 local ngx_var = ngx.var
 local table_insert = table.insert
 local table_concat = table.concat
-local gsub = string.gsub
-local deflate_gzip = utils.deflate_gzip
-
 
 local kong_dict = ngx.shared.kong
 local KONG_VERSION = kong.version
@@ -50,7 +46,6 @@ local WS_OPTS = {
 local OCSP_TIMEOUT = constants.CLUSTERING_OCSP_TIMEOUT
 local CLUSTERING_SYNC_STATUS = constants.CLUSTERING_SYNC_STATUS
 local MAJOR_MINOR_PATTERN = "^(%d+)%.(%d+)%.%d+"
-local REMOVED_FIELDS = require("kong.clustering.compat.removed_fields")
 local _log_prefix = "[clustering] "
 
 local wrpc_config_service
@@ -133,82 +128,6 @@ function _M.new(parent)
 end
 
 
-local function invalidate_keys_from_config(config_plugins, keys)
-  if not config_plugins then
-    return false
-  end
-
-  local has_update
-
-  for _, t in ipairs(config_plugins) do
-    local config = t and t["config"]
-    if config then
-      local name = gsub(t["name"], "-", "_")
-
-      -- Handle Redis configurations (regardless of plugin)
-      if config.redis then
-        local config_plugin_redis = config.redis
-        for _, key in ipairs(keys["redis"]) do
-          if config_plugin_redis[key] ~= nil then
-            config_plugin_redis[key] = nil
-            has_update = true
-          end
-        end
-      end
-
-      -- Handle fields in specific plugins
-      if keys[name] ~= nil then
-        for _, key in ipairs(keys[name]) do
-          if config[key] ~= nil then
-            config[key] = nil
-            has_update = true
-          end
-        end
-      end
-    end
-  end
-
-  return has_update
-end
-
-local function dp_version_num(dp_version)
-  local base = 1000000000
-  local version_num = 0
-  for _, v in ipairs(utils.split(dp_version, ".", 4)) do
-    v = v:match("^(%d+)")
-    version_num = version_num + base * tonumber(v, 10) or 0
-    base = base / 1000
-  end
-
-  return version_num
-end
--- for test
-_M._dp_version_num = dp_version_num
-
-local function get_removed_fields(dp_version_number)
-  local unknown_fields = {}
-  local has_fields
-
-  -- Merge dataplane unknown fields; if needed based on DP version
-  for v, list in pairs(REMOVED_FIELDS) do
-    if dp_version_number < v then
-      has_fields = true
-      for plugin, fields in pairs(list) do
-        if not unknown_fields[plugin] then
-          unknown_fields[plugin] = {}
-        end
-        for _, k in ipairs(fields) do
-          table.insert(unknown_fields[plugin], k)
-        end
-      end
-    end
-  end
-
-  return has_fields and unknown_fields or nil
-end
--- for test
-_M._get_removed_fields = get_removed_fields
-
 local ngx_null = ngx.null
 local function remove_nulls(tbl)
   for k,v in pairs(tbl) do
@@ -221,30 +140,7 @@ local function remove_nulls(tbl)
   return tbl
 end
 
-
--- returns has_update, modified_deflated_payload, err
-local function update_compatible_payload(payload, dp_version)
-  local fields = get_removed_fields(dp_version_num(dp_version))
-
-  if fields then
-    payload = utils.deep_copy(payload, false)
-    local config_table = payload["config_table"]
-    local has_update = invalidate_keys_from_config(config_table["plugins"], fields)
-
-    if has_update then
-      local deflated_payload, err = deflate_gzip(cjson_encode(payload))
-      if deflated_payload then
-        return true, deflated_payload
-      else
-        return true, nil, err
-      end
-    end
-  end
-
-  return false, nil, nil
-end
--- for test
-_M._update_compatible_payload = update_compatible_payload
+local config_version = 0
 
 function _M:export_deflated_reconfigure_payload()
   local config_table, err = declarative.export_config()
@@ -260,13 +156,12 @@ function _M:export_deflated_reconfigure_payload()
     end
   end
 
+  config_version = config_version + 1
 
   -- store serialized plugins map for troubleshooting purposes
   local shm_key_name = "clustering:cp_plugins_configured:worker_" .. ngx.worker.id()
   kong_dict:set(shm_key_name, cjson_encode(self.plugins_configured));
   ngx_log(ngx_DEBUG, "plugin configuration map key: " .. shm_key_name .. " configuration: ", kong_dict:get(shm_key_name))
-
-  local config_hash = self:calculate_config_hash(config_table)
 
   local payload = remove_nulls({
     format_version = config_table._format_version,
@@ -285,12 +180,10 @@ function _M:export_deflated_reconfigure_payload()
   local service = get_config_service(self)
   self.config_call_rpc, self.config_call_args = assert(service:encode_args("ConfigService.SyncConfig", {
     config = payload,
-    version = 192, -- TODO: version?
+    version = config_version,
   }))
 
-  self.current_config_hash = config_hash
-
-  return payload, nil, config_hash
+  return payload, nil
 end
 
 
@@ -308,7 +201,7 @@ function _M:push_config()
     n = n + 1
   end
 
-  ngx_log(ngx_DEBUG, _log_prefix, "config pushed to ", n, " clients")
+  ngx_log(ngx_DEBUG, _log_prefix, "config version #", config_version, " pushed to ", n, " clients")
 end
 
 

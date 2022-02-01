@@ -209,7 +209,7 @@ local function get_config_service()
         data.config.format_version = nil
 
         client.config_obj.next_config = remove_empty_tables(data.config)
-        client.config_obj.next_hash = data.version
+        client.config_obj.next_config_version = tonumber(data.version)
         if client.config_semaphore:count() <= 0 then
           -- the following line always executes immediately after the `if` check
           -- because `:count` will never yield, end result is that the semaphore
@@ -297,17 +297,21 @@ function _M:communicate(premature)
 
   local ping_immediately
   local config_exit
+  local last_config_version = -1
 
   local config_thread = ngx.thread.spawn(function()
     while not exiting() and not config_exit do
       local ok, err = config_semaphore:wait(1)
       if ok then
         local config_table = self.next_config
-        local config_hash  = self.next_hash
-        if config_table then
+        local config_hash  = false
+        if config_table and self.next_config_version > last_config_version then
+          ngx_log(ngx_INFO, _log_prefix, "received config #", self.next_config_version, log_suffix)
+
           local pok, res
           pok, res, err = pcall(self.update_config, self, config_table, config_hash, true)
           if pok then
+            last_config_version = self.next_config_version
             if not res then
               ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", err)
             end
