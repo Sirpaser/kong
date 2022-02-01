@@ -358,8 +358,19 @@ function wrpc_peer:handle(payload)
       local input_data = decodearray(self.decode, rpc.input_type, payload.payloads)
       local ok, output_data = ok_wrapper(pcall(rpc.handler, self, table_unpack(input_data, 1, input_data.n)))
       if not ok then
-        return nil, output_data   -- TODO: send error to logs and peer
+        self:send_payload({
+          mtype = "MESSAGE_TYPE_ERROR",
+          error = {
+            etype = "ERROR_TYPE_UNSPECIFIED",
+            description = tostring(output_data),
+          },
+          srvc_id = payload.svc_id,
+          rpc_id = payload.rpc_id,
+          ack = payload.seq,
+        })
+        return nil, output_data
       end
+
       self:send_payload({
         mtype = "MESSAGE_TYPE_RPC", -- MESSAGE_TYPE_RPC,
         svc_id = rpc.service_id,
@@ -368,6 +379,27 @@ function wrpc_peer:handle(payload)
         payload_encoding = "ENCODING_PROTO3",
         payloads = encodearray(self.encode, rpc.output_type, output_data),
       })
+    end
+  end
+end
+
+
+--- Handle incoming error message (mtype == MESSAGE_TYPE_ERROR).
+function wrpc_peer:handle_error(payload)
+  local etype = payload.error and payload.error.etype or "--"
+  local errdesc = payload.error and payload.error.description or "--"
+  ngx.log(ngx.NOTICE, string.format("[wRPC] Received error message, %s.%s:%s (%s: %q)",
+    payload.svc_id, payload.rpc_id, payload.ack, etype, errdesc
+  ))
+
+  local ack = tonumber(payload.ack) or 0
+  if ack > 0 then
+    -- response to a previous call
+    local response_waiter = self.response_queue[ack]
+    if response_waiter and response_waiter.handle_error then
+      -- TODO: verify expiration
+      response_waiter:handle_error(etype, errdesc)
+      self.response_queue[ack] = nil
     end
   end
 end
@@ -382,11 +414,14 @@ function wrpc_peer:step()
     local payload = msg.payload
 
     if payload.mtype == "MESSAGE_TYPE_ERROR" then
-      -- TODO: send error to waiting call (if any)
+      self:handle_error(payload)
 
     elseif payload.mtype == "MESSAGE_TYPE_RPC" then
-      -- handle "protocol" stuff (deadline, encoding, versions, etc
-      self:handle(payload)
+      if payload.deadline >= ngx.now() then
+        self:handle(payload)
+      else
+        ngx.log(ngx.NOTICE, "[wRPC] Expired message, discarded")
+      end
     end
 
     msg = self:receive()
