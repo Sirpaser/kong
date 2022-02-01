@@ -301,6 +301,14 @@ local function decodearray(decode, typ, l)
   return out
 end
 
+local function encodearray(encode, typ, l)
+  local out = {}
+  for i = 1, l.n do
+    out[i] = encode(typ, l[i])
+  end
+  return out
+end
+
 
 function wrpc_peer:send_payload(payload)
   local seq = self.seq + 1
@@ -331,7 +339,7 @@ function wrpc_peer:handle(payload)
       rpc_id = payload.rpc_id,
       ack = payload.seq,
     })
-    return nil, "INVALID_SERVICE"  -- TODO: send to peer
+    return nil, "INVALID_SERVICE"
   end
 
   local ack = tonumber(payload.ack) or 0
@@ -358,7 +366,7 @@ function wrpc_peer:handle(payload)
         rpc_id = rpc.rpc_id,
         ack = payload.seq,
         payload_encoding = "ENCODING_PROTO3",
-        payloads = { self.encode(rpc.output_type, output_data), },
+        payloads = encodearray(self.encode, rpc.output_type, output_data),
       })
     end
   end

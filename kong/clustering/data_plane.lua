@@ -217,6 +217,7 @@ local function get_config_service()
           client.config_semaphore:post()
         end
       end
+      return { accepted = true }
     end)
   end
 
