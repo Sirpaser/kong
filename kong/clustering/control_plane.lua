@@ -653,6 +653,8 @@ function _M:handle_cp_websocket()
     end
   end
 
+  self:push_config()    -- first config push
+
   ngx_log(ngx_DEBUG, _log_prefix, "data plane connected", log_suffix)
   w_peer:wait_threads()
   w_peer:close()
